@@ -28,9 +28,22 @@ const telClean = s => String(s || '').replace(/[^\d+]/g, '');
 /* ---------- 데이터 ---------- */
 const DEFAULT_SMS = '{세입자}님 안녕하세요. {호실} {월} 임대료 {금액}이(가) 납부일({납입일})까지 확인되지 않아 안내드립니다. 확인 부탁드립니다.';
 const defaults = () => ({
-  v: 1, seq: 1,
+  v: 2, seq: 1,
   buildings: [], units: [], leases: [], payments: [],
-  settings: { pin: null, sms: DEFAULT_SMS, lastBackup: null }
+  settings: {
+    pin: null, sms: DEFAULT_SMS, lastBackup: null,
+    notifications: {
+      enabled: false,
+      time: "09:00",
+      d3: true,
+      d1: true,
+      today: true,
+      overdue: true,
+      partial: false,
+      buildings: "all",
+      lastSentDate: null
+    }
+  }
 });
 let S = defaults();
 let IX = null;
@@ -68,6 +81,184 @@ function topStatus(list) {
   for (const p of list) { const s = status(p); if (RANK[s] > r) { r = RANK[s]; best = s; } }
   return best;
 }
+
+/* ---------- Phase 1: 납부 알림 센터 (인앱) ---------- */
+function getNotifications(t = today()) {
+  const pays = visiblePays().filter(p => ctxOf(p).lease);
+  const out = [];
+  for (const p of pays) {
+    const { lease, unit, bld } = ctxOf(p);
+    if (!lease || !unit || !bld) continue;
+    const st = status(p, t);
+    if (st === 'paid') continue;
+    const daysUntil = diff(t, p.due); // +면 미래, -면 과거
+    const daysOver = diff(p.due, t);  // +면 연체일수
+    if (st === 'late') {
+      out.push({
+        type: 'overdue',
+        payment: p,
+        days: daysOver,
+        title: `${bld.name} ${unit.name} · ${lease.tenant}`,
+        desc: `${daysOver}일 연체 · ${won(remain(p))} 미납 · ${fmtMD(p.due)} 예정`,
+        urgency: 1000 + daysOver
+      });
+    } else if (st === 'part') {
+      out.push({
+        type: 'partial',
+        payment: p,
+        days: daysUntil,
+        title: `${bld.name} ${unit.name} · ${lease.tenant}`,
+        desc: `부분납부 · ${won(remain(p))} 남음 · ${daysUntil===0?'오늘 마감':`D-${daysUntil}`}`,
+        urgency: 300 + (daysUntil<=0?100:0)
+      });
+    } else if (st === 'wait') {
+      if (daysUntil === 0) {
+        out.push({
+          type: 'today',
+          payment: p,
+          days: 0,
+          title: `${bld.name} ${unit.name} · ${lease.tenant}`,
+          desc: `오늘 납부일 · ${won(total(p))}`,
+          urgency: 800
+        });
+      } else if (daysUntil >=1 && daysUntil <=3) {
+        out.push({
+          type: 'soon',
+          payment: p,
+          days: daysUntil,
+          title: `${bld.name} ${unit.name} · ${lease.tenant}`,
+          desc: `D-${daysUntil} · ${fmtMD(p.due)} · ${won(total(p))}`,
+          urgency: 500 - daysUntil
+        });
+      }
+    }
+  }
+  out.sort((a,b) => b.urgency - a.urgency);
+  return out;
+}
+
+/* ---------- Phase 2: 시스템 알림 (브라우저 Notification) ---------- */
+function canNotify() {
+  return typeof window !== 'undefined' && 'Notification' in window;
+}
+function notifPermission() {
+  if (!canNotify()) return 'unsupported';
+  return Notification.permission;
+}
+async function requestNotifPermission() {
+  if (!canNotify()) { toast('이 브라우저는 알림을 지원하지 않아요'); return false; }
+  if (Notification.permission === 'granted') return true;
+  if (Notification.permission === 'denied') { toast('브라우저 설정에서 알림을 허용해 주세요'); return false; }
+  const p = await Notification.requestPermission();
+  if (p === 'granted') { toast('알림 권한을 허용했어요'); render(); return true; }
+  else { toast('알림 권한이 거부됐어요'); render(); return false; }
+}
+
+function getSystemNotifs(t = today()) {
+  const ns = S.settings.notifications;
+  if (!ns) return [];
+  let pays = S.payments.filter(p => ctxOf(p).lease);
+  if (ns.buildings !== 'all' && ns.buildings != null && ns.buildings !== '') {
+    const bid = +ns.buildings;
+    if (!isNaN(bid)) pays = pays.filter(p => { const c = ctxOf(p); return c.unit && c.unit.buildingId === bid; });
+  }
+  const out = [];
+  for (const p of pays) {
+    const { lease, unit, bld } = ctxOf(p);
+    if (!lease || !unit || !bld) continue;
+    const st = status(p, t);
+    if (st === 'paid') continue;
+    const daysUntil = diff(t, p.due);
+    const daysOver = diff(p.due, t);
+    if (st === 'late') {
+      if (!ns.overdue) continue;
+      out.push({ type: 'overdue', payment: p, days: daysOver, title: `${bld.name} ${unit.name} · ${lease.tenant}`, desc: `${daysOver}일 연체 · ${won(remain(p))}`, urgency: 1000 + daysOver });
+    } else if (st === 'part') {
+      if (!ns.partial) continue;
+      out.push({ type: 'partial', payment: p, days: daysUntil, title: `${bld.name} ${unit.name} · ${lease.tenant}`, desc: `부분납부 ${won(remain(p))} 남음`, urgency: 300 });
+    } else if (st === 'wait') {
+      if (daysUntil === 0) {
+        if (!ns.today) continue;
+        out.push({ type: 'today', payment: p, days: 0, title: `${bld.name} ${unit.name} · ${lease.tenant}`, desc: `오늘 납부일 ${won(total(p))}`, urgency: 800 });
+      } else if (daysUntil === 1) {
+        if (!ns.d1) continue;
+        out.push({ type: 'soon', payment: p, days: daysUntil, title: `${bld.name} ${unit.name} · ${lease.tenant}`, desc: `내일 납부 ${won(total(p))}`, urgency: 600 });
+      } else if (daysUntil >=2 && daysUntil <=3) {
+        if (!ns.d3) continue;
+        out.push({ type: 'soon', payment: p, days: daysUntil, title: `${bld.name} ${unit.name} · ${lease.tenant}`, desc: `D-${daysUntil} ${won(total(p))}`, urgency: 500 - daysUntil });
+      }
+    }
+  }
+  out.sort((a,b) => b.urgency - a.urgency);
+  return out;
+}
+
+function sendSystemNotification(notifs) {
+  if (!canNotify() || Notification.permission !== 'granted') return false;
+  if (!notifs.length) return false;
+  const cOver = notifs.filter(n=>n.type==='overdue').length;
+  const cToday = notifs.filter(n=>n.type==='today').length;
+  const cSoon = notifs.filter(n=>n.type==='soon').length;
+  const cPart = notifs.filter(n=>n.type==='partial').length;
+  const parts = [];
+  if (cOver) parts.push(`연체 ${cOver}건`);
+  if (cToday) parts.push(`오늘 ${cToday}건`);
+  if (cSoon) parts.push(`예정 ${cSoon}건`);
+  if (cPart) parts.push(`부분납부 ${cPart}건`);
+  const title = `Rich Go 알림 ${notifs.length}건`;
+  const body = parts.join(' · ') + '\n탭하면 앱에서 확인';
+  const detail = notifs.slice(0,2).map(n=>`• ${n.title} - ${n.desc}`).join('\n');
+  const fullBody = body + (detail ? '\n' + detail : '');
+
+  if (navigator.serviceWorker && navigator.serviceWorker.ready) {
+    navigator.serviceWorker.ready.then(reg => {
+      reg.showNotification(title, {
+        body: fullBody,
+        icon: './icon-192.png',
+        badge: './icon-192.png',
+        tag: 'richgo-daily',
+        renotify: false,
+        requireInteraction: false,
+        data: { url: './' }
+      });
+    });
+  } else {
+    new Notification(title, { body: fullBody, icon: './icon-192.png' });
+  }
+  return true;
+}
+
+function shouldSendToday(force=false) {
+  const ns = S.settings.notifications;
+  if (!ns || !ns.enabled) return false;
+  if (!force && ns.lastSentDate === today()) return false;
+  if (!force) {
+    const now = new Date();
+    const [h,m] = (ns.time||"09:00").split(':').map(Number);
+    const nowMin = now.getHours()*60+now.getMinutes();
+    const targetMin = h*60+m;
+    if (nowMin < targetMin) return false;
+  }
+  return true;
+}
+
+async function checkAndSendDailyNotifs(force=false) {
+  try {
+    if (!S.settings.notifications?.enabled) return;
+    if (!canNotify() || Notification.permission !== 'granted') return;
+    if (!shouldSendToday(force)) return;
+    const notifs = getSystemNotifs(today());
+    if (!notifs.length) return;
+    const ok = sendSystemNotification(notifs);
+    if (ok) {
+      S.settings.notifications.lastSentDate = today();
+      await saveState();
+      render();
+    }
+  } catch(e) { console.error(e); }
+}
+
+
 function chipOf(p) {
   const s = status(p), t = today();
   if (s === 'paid') return { cls: 'paid', label: '납부' };
@@ -154,6 +345,9 @@ function normalize(d) {
   const base = defaults();
   const o = Object.assign(base, d || {});
   o.settings = Object.assign(base.settings, (d && d.settings) || {});
+  o.settings.notifications = Object.assign({}, base.settings.notifications, (d && d.settings && d.settings.notifications) || {});
+  if (!o.settings.notifications.time) o.settings.notifications.time = "09:00";
+  if (o.settings.notifications.buildings === undefined) o.settings.notifications.buildings = "all";
   ['buildings', 'units', 'leases', 'payments'].forEach(k => { if (!Array.isArray(o[k])) o[k] = []; });
   const maxId = Math.max(0, ...['buildings', 'units', 'leases', 'payments'].flatMap(k => o[k].map(x => x.id || 0)));
   if (!o.seq || o.seq <= maxId) o.seq = maxId + 1;
@@ -252,6 +446,8 @@ function homeView() {
 
   const lates = pays.filter(p => status(p) === 'late');
   const lateSum = lates.reduce((a, p) => a + remain(p), 0);
+  const notifs = getNotifications(t);
+
 
   const first = new Date(y, m - 1, 1).getDay(), n = dim(y, m);
   let cells = '';
@@ -275,7 +471,26 @@ function homeView() {
   const stale = S.buildings.length && (!S.settings.lastBackup || diff(S.settings.lastBackup, t) > 30);
   if (stale) notes += `<div class="note">💾 ${S.settings.lastBackup ? `마지막 백업이 ${diff(S.settings.lastBackup, t)}일 전이에요.` : '아직 백업한 적이 없어요.'} 폰을 바꾸거나 브라우저 데이터를 지우면 기록이 사라질 수 있어요. <a href="#" data-act="tab" data-tab="settings">백업하러 가기</a></div>`;
 
+  // Phase 1 알림 카드
+  let notifCard = '';
+  if (notifs.length) {
+    const cOver = notifs.filter(n=>n.type==='overdue').length;
+    const cToday = notifs.filter(n=>n.type==='today').length;
+    const cSoon = notifs.filter(n=>n.type==='soon').length;
+    const cPart = notifs.filter(n=>n.type==='partial').length;
+    const parts = [];
+    if (cOver) parts.push(`연체 ${cOver}건`);
+    if (cToday) parts.push(`오늘 ${cToday}건`);
+    if (cSoon) parts.push(`${cSoon}건 3일 이내`);
+    if (cPart) parts.push(`부분납부 ${cPart}건`);
+    notifCard = `<div class="card notif-card" data-act="openNotifs" role="button" tabindex="0">
+      <div class="row between"><div class="row" style="gap:8px"><span style="font-size:18px">🔔</span><b>알림 ${notifs.length}건</b></div><span class="muted">›</span></div>
+      <div class="small muted" style="margin-top:6px">${parts.join(' · ')}</div>
+    </div>`;
+  }
+
   return `${notes}
+  ${notifCard}
   ${lates.length ? `<button class="banner" data-act="overdue">⚠️ 연체 ${lates.length}건 · 미수 ${won(lateSum)} <span style="margin-left:auto">보기 ›</span></button>` : ''}
   <div class="card">
     <div class="mhead"><button class="ib" data-act="prevMonth" aria-label="이전 달">‹</button>
@@ -317,7 +532,33 @@ function unitsView() {
 
 function settingsView() {
   const s = S.settings, t = today();
+  const ns = s.notifications || { enabled:false, time:"09:00", d3:true, d1:true, today:true, overdue:true, partial:false, buildings:"all", lastSentDate:null };
+  const perm = (typeof Notification !== 'undefined') ? Notification.permission : 'unsupported';
   return `
+  <div class="card" style="border-left:4px solid var(--brand)"><b>🔔 납부 알림 (Phase 2)</b>
+    <p class="small muted">매일 설정한 시간에 연체·납부 예정을 폰 상단 알림으로 띄워요. 서버 없이 기기 안에서만 동작해요. iOS는 앱이 열려 있을 때만 표시돼요.</p>
+    <div class="f"><label class="chk"><input type="checkbox" data-act="toggleNotifEnabled" ${ns.enabled?'checked':''}><span><b>시스템 알림 사용</b> <span class="small muted">(${perm})</span></span></label></div>
+    <div style="${ns.enabled?'':'opacity:.5;pointer-events:none'}">
+      <div class="f2">
+        <div class="f"><label>알림 시간</label><input type="time" value="${ns.time||'09:00'}" data-act="notifTime" data-type="time"></div>
+        <div class="f"><label>건물 필터</label><select data-act="notifBuilding"><option value="all" ${ns.buildings==='all'?'selected':''}>전체 건물</option>${S.buildings.map(b=>`<option value="${b.id}" ${String(ns.buildings)===String(b.id)?'selected':''}>${esc(b.name)}</option>`).join('')}</select></div>
+      </div>
+      <div class="f" style="gap:8px">
+        <label class="small muted">알림 종류</label>
+        <label class="chk"><input type="checkbox" data-act="toggleNotifType" data-type="overdue" ${ns.overdue?'checked':''}><span>연체</span></label>
+        <label class="chk"><input type="checkbox" data-act="toggleNotifType" data-type="today" ${ns.today?'checked':''}><span>오늘 납부일</span></label>
+        <label class="chk"><input type="checkbox" data-act="toggleNotifType" data-type="d1" ${ns.d1?'checked':''}><span>D-1 (내일)</span></label>
+        <label class="chk"><input type="checkbox" data-act="toggleNotifType" data-type="d3" ${ns.d3?'checked':''}><span>D-3 (2~3일 전)</span></label>
+        <label class="chk"><input type="checkbox" data-act="toggleNotifType" data-type="partial" ${ns.partial?'checked':''}><span>부분납부</span></label>
+      </div>
+      <div class="row" style="flex-wrap:wrap;margin-top:8px">
+        <button class="btn pri" data-act="testNotif">🔔 지금 테스트 알림</button>
+        <button class="btn" data-act="requestNotifPerm">권한 요청</button>
+      </div>
+      <div class="small muted" style="margin-top:8px">마지막 발송: ${ns.lastSentDate||'없음'} · 권한: ${perm} · ${ns.enabled ? (perm==='granted' ? '정상 작동' : '권한이 필요해요') : '꺼짐'}</div>
+    </div>
+  </div>
+
   <div class="card"><b>🔒 앱 잠금</b>
     <p class="small muted">PIN 4자리로 앱을 잠가요. 세입자 개인정보 보호용입니다.</p>
     <div class="row"><button class="btn" data-act="setPin">${s.pin ? 'PIN 변경' : 'PIN 설정'}</button>${s.pin ? '<button class="btn danger" data-act="clearPin">잠금 해제</button>' : ''}</div></div>
@@ -451,6 +692,26 @@ function openLeaseForm(unitId, leaseId) {
   </form>`, { back: () => openUnit(unitId) });
 }
 
+function openNotifs() {
+  const notifs = getNotifications();
+  if (!notifs.length) {
+    openSheet('알림', `<div class="empty-state"><div class="big">🔔</div><p>알림이 없어요.<br><span class="small muted">3일 이내 납부 예정, 오늘 납부일, 연체, 부분납부가 여기에 표시돼요.</span></p></div>`);
+    return;
+  }
+  const rows = notifs.map(n => {
+    const p = n.payment;
+    const chipCls = n.type==='overdue' ? 'late' : n.type==='today' ? 'wait' : n.type==='soon' ? 'wait' : 'part';
+    const chipLabel = n.type==='overdue' ? `연체 ${n.days}일` : n.type==='today' ? '오늘 납부일' : n.type==='soon' ? `D-${n.days}` : '부분납부';
+    return `<div class="pc ${n.type==='overdue'?'late': n.type==='today'?'wait':'part'}" data-act="pay" data-id="${p.id}" style="cursor:pointer">
+      <div class="row between">
+        <div class="grow"><div class="t">${esc(n.title)}</div><div class="small muted">${esc(n.desc)}</div></div>
+        <div class="right"><span class="chip ${chipCls}">${chipLabel}</span></div>
+      </div>
+    </div>`;
+  }).join('');
+  openSheet(`🔔 알림 ${notifs.length}건`, `<div style="display:flex;flex-direction:column;gap:8px">${rows}</div><div class="note" style="margin-top:12px">💡 D-3, 오늘, 연체, 부분납부만 표시해요. 건물 필터가 적용돼요.</div>`);
+}
+
 function openPay(id, back) {
   const p = S.payments.find(x => x.id === id); if (!p) return;
   const { lease, unit, bld } = ctxOf(p);
@@ -571,6 +832,7 @@ const ACTIONS = {
   thisMonth: () => { initMonth(); render(); },
   selday: el => { ui.sel = el.dataset.date; render(); },
   overdue: () => openOverdue(),
+  openNotifs: () => openNotifs(),
   closeSheet: () => closeSheet(),
   sheetBack: () => cur && cur.opts.back && cur.opts.back(),
   key: el => pressKey(el.dataset.k),
@@ -637,6 +899,59 @@ const ACTIONS = {
     if (!confirm('모든 데이터를 삭제할까요? 되돌릴 수 없어요.\n(먼저 백업을 권장해요)')) return;
     if (!confirm('정말 삭제할까요?')) return;
     const pin = S.settings.pin; S = defaults(); S.settings.pin = pin; ui.filter = 'all'; await commit('전체 삭제했어요');
+  },
+
+  // Phase 2 알림 설정
+  toggleNotifEnabled: async el => {
+    const on = el.checked;
+    if (on) {
+      const ok = await requestNotifPermission();
+      if (!ok) { el.checked = false; return; }
+    }
+    S.settings.notifications.enabled = on;
+    await commit(on ? '알림을 켰어요. 매일 설정 시간에 확인해요' : '알림을 껐어요');
+    if (on) checkAndSendDailyNotifs(true);
+  },
+  toggleNotifType: async el => {
+    const type = el.dataset.type;
+    S.settings.notifications[type] = el.checked;
+    await commit('알림 설정을 저장했어요');
+  },
+  notifTime: async el => {
+    S.settings.notifications.time = el.value || "09:00";
+    await commit(`알림 시간을 ${S.settings.notifications.time}로 저장했어요`);
+  },
+  notifBuilding: async el => {
+    S.settings.notifications.buildings = el.value;
+    await commit('건물 필터를 저장했어요');
+  },
+  requestNotifPerm: async () => {
+    await requestNotifPermission();
+  },
+  testNotif: async () => {
+    if (!canNotify()) return toast('이 브라우저는 알림을 지원하지 않아요');
+    if (Notification.permission !== 'granted') {
+      const ok = await requestNotifPermission();
+      if (!ok) return;
+    }
+    const notifs = getSystemNotifs(today());
+    if (!notifs.length) {
+      // 테스트용 더미 알림이 없으면 샘플로 보내기
+      sendSystemNotification([{type:'today', title:'테스트', desc:'Rich Go 알림 테스트', payment:{id:0}}]);
+      // 실제로는 더미
+      if (navigator.serviceWorker && navigator.serviceWorker.ready) {
+        const reg = await navigator.serviceWorker.ready;
+        reg.showNotification('Rich Go 테스트 알림', { body: '🔔 알림이 정상 작동해요\n연체/오늘/예정 내역이 있을 때 매일 알림이 와요', icon:'./icon-192.png', badge:'./icon-192.png', tag:'richgo-test' });
+      } else {
+        new Notification('Rich Go 테스트 알림', { body: '알림이 정상 작동해요' });
+      }
+      toast('테스트 알림을 보냈어요');
+    } else {
+      sendSystemNotification(notifs);
+      toast(`알림 ${notifs.length}건을 보냈어요`);
+      S.settings.notifications.lastSentDate = null; // 테스트이므로 날짜 초기화 안 함, 강제로 다시 보낼 수 있게
+      await saveState();
+    }
   }
 };
 function setMonth(y, m) {
@@ -726,6 +1041,8 @@ async function boot() {
   document.addEventListener('change', e => {
     const t = e.target;
     if (t.id === 'flt') { ui.filter = t.value; render(); }
+    else if (t.dataset.act === 'notifTime') { S.settings.notifications.time = t.value || "09:00"; saveState().then(()=>toast(`알림 시간 ${S.settings.notifications.time}`)); }
+    else if (t.dataset.act === 'notifBuilding') { S.settings.notifications.buildings = t.value; saveState().then(()=>{ toast('건물 필터 저장'); render(); }); }
     else if (t.id === 'importFile') { const f = t.files[0]; if (f) f.text().then(importJsonText); t.value = ''; }
     else if (t.name === 'start' && t.form && t.form.dataset.form === 'lease' && t.value) {
       const fm = t.form.elements;
@@ -746,7 +1063,21 @@ async function boot() {
   render();
   if (S.settings.pin) showLock(); else unlocked = true;
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-  if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
+  if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+    // Phase 2: 서비스워커 준비 후 매일 알림 체크
+    setTimeout(() => { checkAndSendDailyNotifs(); }, 1500);
+  }
+  // 1분마다 시간 체크 (앱이 열려 있을 때만)
+  setInterval(() => { checkAndSendDailyNotifs(); }, 60*1000);
+}
+
+function bootVisibilityCheck() {
+  // 앱이 다시 보일 때마다 알림 체크
+  if (!document.hidden) checkAndSendDailyNotifs();
+}
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) bootVisibilityCheck(); });
 }
 
 if (typeof window !== 'undefined' && typeof document !== 'undefined') boot();
