@@ -4,13 +4,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0f766e">
+<meta name="description" content="Rich Go - 건물, 호실, 세입자 임대료 납부 관리. 오프라인 PWA, 데이터는 기기 내에만 저장.">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Rich Go">
-<title>Rich Go</title>
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<title>Rich Go - 임대료 관리</title>
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="icon" href="icon-192.png">
-<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+<link rel="icon" type="image/png" sizes="512x512" href="icon-512.png">
+<link rel="apple-touch-icon" sizes="180x180" href="icon-192.png">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -19,14 +22,14 @@
   <div id="topRight"></div>
 </header>
 <main id="view"></main>
-<nav class="tabs">
+<nav class="tabs" aria-label="하단 메뉴">
   <button class="tab" data-act="tab" data-tab="home"><span>📅</span>홈</button>
   <button class="tab" data-act="tab" data-tab="units"><span>🏢</span>호실</button>
   <button class="tab" data-act="tab" data-tab="settings"><span>⚙️</span>설정</button>
 </nav>
-<div id="sheet" class="sheet"></div>
+<div id="sheet" class="sheet" aria-hidden="true"></div>
 <div id="lock" class="lock"></div>
-<div id="toast" class="toast"></div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
 <input type="file" id="importFile" accept="application/json,.json" hidden>
 <script src="app.js"></script>
 </body>

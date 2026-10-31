@@ -1,19 +1,31 @@
 {
-  "id": "/richgo/app-v2",
-  "name": "Rich Go",
+  "name": "Rich Go - 임대료 납부 관리",
   "short_name": "Rich Go",
-  "description": "임대료 납부 관리",
-  "lang": "ko",
-  "start_url": "./?source=pwa",
+  "description": "임대료 납부 관리 PWA - 건물, 호실, 계약, 납부 관리. 오프라인 지원, 데이터는 기기 내에만 저장.",
+  "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#f4f6f5",
+  "background_color": "#0f766e",
   "theme_color": "#0f766e",
-  "prefer_related_applications": false,
   "icons": [
-    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
-    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
-    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+    {
+      "src": "./icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
   ]
 }
